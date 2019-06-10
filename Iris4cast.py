@@ -168,6 +168,10 @@ class Dataset:
                     if self.data[key][i].coords(coord)!=[]:
                         self.data[key][i].remove_coord(f"bin{j}")
 
+    def collapse_over(self,coord,aggregator=iris.analysis.MEAN):
+        for key in self.data:
+            for i,entry in enumerate(self.data[key]):
+                self.data[key][i]=self.data[key][i].collapsed(coord,aggregator)
 
     def apply_coslat_mean(self,mask=None):
         for key in self.data:
@@ -535,3 +539,4 @@ if run:
     print(f"collapsed lat and lon (t={t5-t4:.1f}).")
     
     print("finished!")
+
