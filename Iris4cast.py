@@ -244,6 +244,9 @@ class Dataset:
                 for k in range(lon):
                     means[i,j,k]=dist[np.digitize(dist[:,j,k],\
                           self.distribution[:,j,k],right=True)==i+1,j,k].mean()
+        #interpolates empty bins as being halfway between the distribution bounds            
+        for i,j,k in np.argwhere(np.isnan(means)):
+            means[i,j,k]=self.distribution[i:i+2,j,k].mean()
         self.dist_means=means
         
 """Analysis is a subclass of Dataset that deals with reanalysis. At the moment
