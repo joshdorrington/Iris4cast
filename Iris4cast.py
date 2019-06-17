@@ -40,21 +40,21 @@ class Dataset:
     def __init__(self,field,dates,leads=None):
         
 
-	"""
-	Dataset is the base class shared by all analysis and forecast data sets. It defines
-	all functions that are generic between datasets. Not normally used directly.
-
-	
-	Args:
-	* field - A string used to identify which fields to load from file.
+        """
+    	Dataset is the base class shared by all analysis and forecast data sets. It defines
+    	all functions that are generic between datasets. Not normally used directly.
     
-    *date - a list or tuple of 2 datetime.datetime objects specifying the
-            first and last datetime to include in the data
+    	
+    	Args:
+    	* field - A string used to identify which fields to load from file.
         
-    *leads - used by the Forecast class only, a list or tuple of 2 floats,
-             specifying minimum and maximum lead times in days to include.
-	
-	"""
+        *date - a list or tuple of 2 datetime.datetime objects specifying the
+                first and last datetime to include in the data
+            
+        *leads - used by the Forecast class only, a list or tuple of 2 floats,
+                 specifying minimum and maximum lead times in days to include.
+    	
+    	"""
 
         self.field=field
         self.dates=dates
@@ -362,7 +362,7 @@ class Dataset:
         copy.data=cp.deepcopy(self.data)
         return copy
     
-    def apply(self,func,*args,in_place=True,**kwargs):
+    def apply(self,func,*args,in_place=True,keys=None,**kwargs):
         """A method which applies a function to every cube in Dataset
         
         Args:
@@ -373,8 +373,10 @@ class Dataset:
             not. If True, cube is set equal to func(cube), unless the output
             is None, in which case cube is removed from the CubeList.
         """
-        
-        for key in self.data:
+        if keys is None:
+            keys=self.data
+            
+        for key in keys:
             for i,entry in enumerate(self.data[key]):
                 result=func(entry,*args,**kwargs)
                 if in_place:
@@ -386,11 +388,13 @@ class Dataset:
                         self.data[key].remove(self.data[key][i])
 
             
-    def apply_constraint(self,constraint):
+    def apply_constraint(self,constraint,keys=None):
         
         """Apply a constraint to all cubes in Dataset"""
-        
-        for key in self.data:
+        if keys is None:
+            keys=self.data
+            
+        for key in keys:
             self.data[key]=self.data[key].extract(constraint)
             
     def get_climatology(self,percentiles):
@@ -554,7 +558,7 @@ class EC45Forecast(Forecast):
     
     def _fsetup(self):
         self.path="/mnt/seasonal/ec45/netcdf/"+self.field+"/"
-        self.max_ens=10
+        self.max_ens=11
         self.U=cf_units.Unit(f"Days since {cf_units.EPOCH}",\
                          calendar=cf_units.CALENDAR_PROLEPTIC_GREGORIAN)
         self.type=EC45Forecast
