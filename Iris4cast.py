@@ -25,9 +25,7 @@ SubxForecast, EC45Forecast, and Seas5Forecast add filetype specific data process
 """
 
         
-"""
-Dataset is the base object shared by all analysis and forecast data sets. It defines
-all functions that are generic between datasets"""
+
 import iris
 import copy as cp
 import datetime as dt
@@ -41,43 +39,113 @@ class Dataset:
     
     def __init__(self,field,dates,leads=None):
         
-        self.field=field
+
+	"""
+	Dataset is the base class shared by all analysis and forecast data sets. It defines
+	all functions that are generic between datasets. Not normally used directly.
+
+	
+	Args:
+	* field - A string used to identify which fields to load from file.
+    
+    *date - a list or tuple of 2 datetime.datetime objects specifying the
+            first and last datetime to include in the data
         
-        assert dates[0].hour==dates[1].hour
-        self.T="time"
+    *leads - used by the Forecast class only, a list or tuple of 2 floats,
+             specifying minimum and maximum lead times in days to include.
+	
+	"""
+
+        self.field=field
         self.dates=dates
-        self.hour=dates[0].hour
         self._d_l,self._d_u=dates
-        self.calendar_bounds=[d.timetuple().tm_yday for d in dates]
         self.leads=leads
+
+        #Only data of the same forecast hour is currently supported.
+        assert dates[0].hour==dates[1].hour
+        self.hour=dates[0].hour
+
+        #Name of the primary time coordinate
+        self.T="time"
+        #The expected position of the primary time coordinate in the cube
+        self.t=0
+
+        #The day of year associated with 'dates'
+        self.calendar_bounds=[d.timetuple().tm_yday for d in dates]
+        
         self.type=Dataset
+        
+        #A dictionary that can contain any number of iris CubeLists, each
+        #labelled with a keyword. The load_data method generates a "data" and
+        #a "clim" CubeList
+        
+        self.data={}
+        #Used by the get_climatology method
         self.dist_means=None
         self.distribution=None
-        self.t=0
+        
+        #The time unit to use
         self.U=cf_units.Unit(f"Days since {cf_units.EPOCH}",\
                              calendar=cf_units.CALENDAR_GREGORIAN)
-        
+
+        #Constraints applied to the data at different points.
         self.constraints={
+        #keep only data with a valid time coordinate
         "load":iris.Constraint(cube_func=lambda cube: cube.coords(self.T)!=[]),
         
+        #keep only data that falls within the calendar_bounds
         "calendar":iris.Constraint(coord_values={"day_of_year":lambda cell:\
                 self._in_calendar_bounds(cell)}),
     
+        #keep only data for the right hour
         "hour":iris.Constraint(hour=self.hour),
         
+        #keep only data that falls within the dates
         "data":iris.Constraint(coord_values={self.T:lambda cell:\
                 self._d_l<=cell<=self._d_u}),
-    
+        
+        #keep only data that falls outside the dates
         "clim":iris.Constraint(coord_values={self.T:lambda cell:\
                 (self._d_l>cell)or (cell>self._d_u)})
                 }
         self._setup()
         
-    #used by derived classes
+    def change_dates(self,newdates):
+        """
+        Redefines the 'dates' attribute to the list of 2 datetimes 'newdates',
+        reapplying the "data" and "clim" constraints to match
+        
+        **currently quite slow for large cubelists**
+        """
+        self.dates=newdates
+        self._d_l,self._d_u=self.dates
+        self.calendar_bounds=[d.timetuple().tm_yday for d in self.dates]
+        
+        CL_data=iris.cube.CubeList()
+        CL_clim=iris.cube.CubeList()
+
+        for key in self.data:
+            a=self.data[key].extract(self.constraints["data"])
+            if a != []:
+                CL_data.append(a)
+            a=self.data[key].extract(self.constraints["clim"])
+            if a != []:
+                CL_clim.append(a)
+        
+        CL_data=iris.cube.CubeList([c for C in CL_data for c in C])
+        CL_clim=iris.cube.CubeList([c for C in CL_clim for c in C])
+        
+        self.data["data"]=CL_data.concatenate()
+        self.data["clim"]=CL_clim.concatenate()
+        
+    
     def _setup(self):
+        """empty method used by derived classes."""
         pass
     
     def set_path(self,path):
+        """set the path from which to load data"""
+        
         if os.path.isdir(path):
             self.path=path
         else:
@@ -85,11 +153,19 @@ class Dataset:
 
          
     def add_constraints(self,constr_dict):
+        
+        """add a dictionary of constraints 'constr_dict' to the constraints
+        attribute. Any previously defined keywords will be overwritten."""
+        
         for key in constr_dict:
             self.constraints[key]=constr_dict[key]
 
         
-    def load_data(self):
+    def load_data(self,strict=True):
+        
+        """Load data from self.path as a list of iris cubes, preprocess it, 
+        and split it into two CubeLists "data" and "clim".
+        """
         
         self.data=iris.load([self.path+f for f in os.listdir(self.path) if f.endswith(".nc")],
                              constraints=self.constraints["load"])
@@ -98,16 +174,23 @@ class Dataset:
         a=self.data.extract(self.constraints["data"])
         c=self.data.extract(self.constraints["clim"])
         
-        if a is None: raise(ValueError("No data after applying constraints."))
-        if c is None: raise(ValueError("No climatology data after applying constraints."))
+        if strict:
+            if a is None: raise(ValueError("No data after applying constraints."))
+            if c is None: raise(ValueError("No climatology data after applying constraints."))
 
         self.data={"data":a,"clim":c}
         
     def _clean_loaded_data(self):
+        """empty method used by derived classes."""
+
         pass
 
-    #evaluates whether x is within the calendar bounds
+
     def _in_calendar_bounds(self,x):
+        
+        """Evaluates whether a real number x lies between the calendar_bounds
+        of the dataset, wrapping around the end of the year if necessary."""
+        
         c0,c1=self.calendar_bounds
         if c1<c0:
             ans=(x<=c1) or (x>=c0)
@@ -115,17 +198,21 @@ class Dataset:
             ans=(x<=c1) and (x>=c0)
         return ans     
            
-    def restrict_area(self,key):
+    def restrict_area(self,region):
         
-        if key.lower()=="europe":
+        """A convenience method that restricts the spatial extent of the 
+        Dataset to one of a few preset domains, defined by a string "region".
+        """
+        
+        if region.lower()=="europe":
             lons=[-15,20]
             lats=[32,60]
                 
-        elif key.lower()=="france":
+        elif region.lower()=="france":
             lons=[-5,8]
             lats=[42,51]
         
-        else: raise(ValueError(f"Unrecognised key {key}."))
+        else: raise(ValueError(f"Unrecognised region {region}."))
         
         #We use this over intersection, because it works for cubelists
         area_constr=iris.Constraint(longitude=lambda x: lons[0]<=x<=lons[1],\
@@ -134,12 +221,53 @@ class Dataset:
             self.data[key]=self.data[key].extract(area_constr)
        
     def add_cat_coord(self,iccat_function,coordname,base_coord):
+        
+        """Adds a categorical coordinate to all cubes in Dataset.data, defined
+        by 'iccat_function' relative to 'base_coord', and called 'coordname'.
+        
+        Note that the name of the new coord is defined internally by
+        iccat_function; coordname serves only to graciously handle the case when
+        that coordinate already exists."""
+        
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
                 if entry.coords(coordname)==[]:
                     iccat_function(entry,base_coord)
-                    
+           
+    def change_units(self,unit_str=None,cf_unit=None):
+        
+        """Changes the units of all cubes in the Dataset to a new unit given
+        either by a valid cf_units.Unit string specifier 'unit_str', or a 
+        cf_units.Unit object, 'cf_unit'."""
+        
+        if unit_str is not None and cf_unit is not None:
+            raise(ValueError("Only one unit can be provided."))
+        elif unit_str is not None:
+            unit=cf_units.Unit(unit_str)
+        elif cf_unit is not None:
+            unit=cf_unit
+        else: raise(ValueError("A unit must be provided."))
+        
+        for key in self.data:
+            for i,entry in enumerate(self.data[key]):
+                entry.convert_units(unit)
+                
     def aggregate_by(self,coords,bins,aggregator=iris.analysis.MEAN):
+        
+        """Aggregates the coordinates of all cubes in Dataset into user defined
+        bins. 
+        
+        Args:
+            *coords - A list of strings which are the coordinates
+        to be aggregated over.
+        
+            *bins - A corresponding list of lists 'bins'. bins[i]
+        should contain the bounding values over which to group coords[i].
+        
+        Kwargs:
+            *aggregator -A valid iris.analysis.Aggregator object which specifies
+            how to aggregate entries together.
+        """
         
         binlabels=[]
         for j,coord in enumerate(coords):
@@ -161,19 +289,40 @@ class Dataset:
                     coord_dim=entry.coord_dims(entry.coord(coord))
                     entry.add_aux_coord(iris.coords.AuxCoord(label,\
                                        var_name=f"bin{j}"),data_dims=coord_dim)
-                print(binlabels)
-                print(entry.coords(*binlabels))
+                    
                 self.data[key][i]=entry.aggregated_by(binlabels,aggregator)
                 for j,coord in enumerate(coords):
                     if self.data[key][i].coords(coord)!=[]:
                         self.data[key][i].remove_coord(f"bin{j}")
 
     def collapse_over(self,coord,aggregator=iris.analysis.MEAN):
+        
+        """Collapses all cubes in Dataset over a single coordinate.
+        
+        Args:
+            *coords - A string which is the coordinate to collapse.
+        
+        Kwargs:
+            *aggregator -A valid iris.analysis.Aggregator object which specifies
+            how to collapse the coordinate.
+        """
+        
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
                 self.data[key][i]=self.data[key][i].collapsed(coord,aggregator)
 
     def apply_coslat_mean(self,mask=None):
+        
+        """Collapses the latitude and longitude coordinates of all cubes in 
+        Dataset, using a cosine latitude weighting.
+        
+        Kwargs:
+            *mask:
+                A cube with matching latitude and longitude coordinates to
+                the cubes in Dataset. Each gridpoint in 'mask' should vary between
+                0 (totally masked) to 1 (totally unmasked).
+        """
+        
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
 
@@ -189,7 +338,9 @@ class Dataset:
                 self.data[key][i]=entry.collapsed(["latitude","longitude"],\
                                   iris.analysis.MEAN,weights=weights) 
 
-    def regrid_to(self,dataset=None,cube=None):
+    def regrid_to(self,dataset=None,cube=None,regridder=iris.analysis.Linear()):
+        """regrids every cube in Dataset to match either those of another
+        Dataset object, or an iris.Cube object."""
         
         if cube is None and dataset is None:
             raise(ValueError("No reference for regridding provided!"))
@@ -200,36 +351,57 @@ class Dataset:
             
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
-                self.data[key][i]=entry.regrid(ref_cube,iris.analysis.Linear())
+                self.data[key][i]=entry.regrid(ref_cube,regridder)
                 
     def copy(self):
-        copy=self.type(self.field,self.dates,self.leads)
+        """A method which returns a copy of the Dataset"""
         
+        copy=self.type(self.field,self.dates,self.leads)
+        copy.dist_means=self.dist_means
+        copy.distribution=self.distribution
         copy.data=cp.deepcopy(self.data)
         return copy
     
     def apply(self,func,*args,in_place=True,**kwargs):
+        """A method which applies a function to every cube in Dataset
+        
+        Args:
+            *func - A function of the type func(cube,*args,**kwargs).
+            
+        Kwargs:
+            in_place - A boolean, specifying whether func returns an output or 
+            not. If True, cube is set equal to func(cube), unless the output
+            is None, in which case cube is removed from the CubeList.
+        """
         
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
                 result=func(entry,*args,**kwargs)
-                
-                if result is not None:
-                    self.data[key][i]=func(entry,*args,**kwargs)
-                    
-                elif in_place:
-                    self.data[key].remove(self.data[key][i])
-                else:
+                if in_place:
                     pass
+                else:
+                    if result is not None:
+                        self.data[key][i]=result
+                    else:
+                        self.data[key].remove(self.data[key][i])
+
             
     def apply_constraint(self,constraint):
+        
+        """Apply a constraint to all cubes in Dataset"""
+        
         for key in self.data:
             self.data[key]=self.data[key].extract(constraint)
             
-    #A method that finds the gridpointwise distribution of the dataset.
-    #self.distribution 
     def get_climatology(self,percentiles):
         
+        """Finds the distribution of all values in the Dataset. 
+        
+        Args:
+            * percentiles - A numpy array ([p_1,...,p_N]) where 0<=p_i<=100,
+            which defines the percentiles of the data distribution to calculate.
+            
+            """
         self.percentiles=percentiles
         
         lat,lon=self.data["clim"][0].shape[-2:]
@@ -315,7 +487,7 @@ class Forecast(Dataset):
     
     def apply_quantile_correction(self):
         
-        lat,lon=self.data["clim"][0].shape[-2:]
+        lat,lon=self.data["data"][0].shape[-2:]
         
         for i,entry in enumerate(self.data["data"]):
             shape=entry.data.shape
@@ -366,7 +538,17 @@ class SubxForecast(Forecast):
         self.data=self.data.extract(self.constraints["hour"])
         self.data=self.data.extract(self.constraints["ens"])
 
-
+    def remove_masked(self):
+        for key in self.data:
+            self.data[key].realise_data()   
+            masked=[]
+            
+            for entry in self.data[key]:
+                if not np.all(entry.data.mask==False):
+                    masked.append(entry)
+                    
+            for entry in masked:
+                self.data[key].remove(entry)
                 
 class EC45Forecast(Forecast):
     
@@ -539,4 +721,5 @@ if run:
     print(f"collapsed lat and lon (t={t5-t4:.1f}).")
     
     print("finished!")
+
 
