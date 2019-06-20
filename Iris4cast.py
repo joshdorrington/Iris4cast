@@ -109,35 +109,7 @@ class Dataset:
                 (self._d_l>cell)or (cell>self._d_u)})
                 }
         self._setup()
-        
-    def change_dates(self,newdates):
-        """
-        Redefines the 'dates' attribute to the list of 2 datetimes 'newdates',
-        reapplying the "data" and "clim" constraints to match
-        
-        **currently quite slow for large cubelists**
-        """
-        self.dates=newdates
-        self._d_l,self._d_u=self.dates
-        self.calendar_bounds=[d.timetuple().tm_yday for d in self.dates]
-        
-        CL_data=iris.cube.CubeList()
-        CL_clim=iris.cube.CubeList()
-
-        for key in self.data:
-            a=self.data[key].extract(self.constraints["data"])
-            if a != []:
-                CL_data.append(a)
-            a=self.data[key].extract(self.constraints["clim"])
-            if a != []:
-                CL_clim.append(a)
-        
-        CL_data=iris.cube.CubeList([c for C in CL_data for c in C])
-        CL_clim=iris.cube.CubeList([c for C in CL_clim for c in C])
-        
-        self.data["data"]=CL_data.concatenate()
-        self.data["clim"]=CL_clim.concatenate()
-        
+             
     
     def _setup(self):
         """empty method used by derived classes."""
@@ -151,6 +123,14 @@ class Dataset:
         else:
             raise(ValueError("Not a valid path."))
 
+    def copy(self):
+        """A method which returns a copy of the Dataset"""
+        
+        copy=self.type(self.field,self.dates,self.leads)
+        copy.dist_means=self.dist_means
+        copy.distribution=self.distribution
+        copy.data=cp.deepcopy(self.data)
+        return copy
          
     def add_constraints(self,constr_dict):
         
@@ -184,7 +164,6 @@ class Dataset:
         """empty method used by derived classes."""
 
         pass
-
 
     def _in_calendar_bounds(self,x):
         
@@ -251,6 +230,34 @@ class Dataset:
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
                 entry.convert_units(unit)
+                
+    def change_dates(self,newdates):
+        """
+        Redefines the 'dates' attribute to the list of 2 datetimes 'newdates',
+        reapplying the "data" and "clim" constraints to match
+        
+        **currently quite slow for large cubelists**
+        """
+        self.dates=newdates
+        self._d_l,self._d_u=self.dates
+        self.calendar_bounds=[d.timetuple().tm_yday for d in self.dates]
+        
+        CL_data=iris.cube.CubeList()
+        CL_clim=iris.cube.CubeList()
+    
+        for key in self.data:
+            a=self.data[key].extract(self.constraints["data"])
+            if a != []:
+                CL_data.append(a)
+            a=self.data[key].extract(self.constraints["clim"])
+            if a != []:
+                CL_clim.append(a)
+        
+        CL_data=iris.cube.CubeList([c for C in CL_data for c in C])
+        CL_clim=iris.cube.CubeList([c for C in CL_clim for c in C])
+        
+        self.data["data"]=CL_data.concatenate()
+        self.data["clim"]=CL_clim.concatenate()
                 
     def aggregate_by(self,coords,bins,aggregator=iris.analysis.MEAN):
         
@@ -352,15 +359,7 @@ class Dataset:
         for key in self.data:
             for i,entry in enumerate(self.data[key]):
                 self.data[key][i]=entry.regrid(ref_cube,regridder)
-                
-    def copy(self):
-        """A method which returns a copy of the Dataset"""
-        
-        copy=self.type(self.field,self.dates,self.leads)
-        copy.dist_means=self.dist_means
-        copy.distribution=self.distribution
-        copy.data=cp.deepcopy(self.data)
-        return copy
+
     
     def apply(self,func,*args,in_place=True,keys=None,**kwargs):
         """A method which applies a function to every cube in Dataset
@@ -428,6 +427,113 @@ class Dataset:
         for i,j,k in np.argwhere(np.isnan(means)):
             means[i,j,k]=self.distribution[i:i+2,j,k].mean()
         self.dist_means=means
+        
+    def get_seasonal_cycle(self,N,keys=None):
+        
+        """Fits N sine modes to the data series, with frequencies of n/(365.25 days)
+        for n in [1,...,N], in order to calculate a smooth seasonal cycle.
+        
+        Kwargs:
+            *keys - A list of keys to self.data, specifying which data to use
+            to calculate the cycle. If keys is None, all data in the dataset
+            will be used.
+        """
+class _Deseasonaliser:
+
+    def __init__(self,data,keys,N,period=365.25,coeffs=None):
+        self.raw_data=[]
+        self.t=[]
+        self.t_unit=None
+        self.tref=None
+        
+        self.keys=keys
+        self.N=N
+        self.pnum=2*(N+1)
+        self.period=period
+        self.coeffs=None
+        
+        for key in keys:
+            for cube in data[key]:
+                self.raw_data.append(cube.data)
+                
+                if self.t_unit is not None:
+                    if self.t_unit!=cube.coord("time").units:
+                        raise(ValueError("Clashing time units in data."))
+                else:
+                    self.t_unit=cube.coord("time").units
+                    
+                self.t.append(cube.coord("time").points)
+                
+        self.raw_data=np.concatenate(self.raw_data,axis=0)    
+        self.t=np.concatenate(self.t,axis=0)
+        
+        self._setup_data()
+        self.lat,self.lon=self.raw_data.shape[1:]
+        
+    def _setup_data(self):
+        
+        self.raw_data=self.raw_data[np.argsort(self.t)]
+        self.t.sort()
+        self.tref=self.t[0]
+        self.t=(self.t-self.tref)%self.period
+        
+    #intelligently guesses initial parameters
+    def _guess_p(self,tstd):
+        
+        p=np.zeros(self.pnum)
+        
+        for i in range(0,self.N):
+            p[2+2*i]=tstd/(i+1.0)
+        return p        
+    
+    #defines multimode sine function for fitting
+    def _evaluate_fit(self,x,p,N):
+        ans=p[0]*x+p[1]
+        for i in range(0,N):
+            ans+=p[2*i+2] * np.sin(2 * np.pi * (i+1)/365.25 * x + p[2*i+3])
+        return ans
+    
+    #defines error function for optimisation
+    def _get_residual(self,p,y,x,N):
+        return y - self._evaluate_fit(x,p,N)
+    
+    def fit_cycle(self):
+        from scipy.optimize import leastsq
+        fit_coeffs=np.zeros([self.pnum,self.lat,self.lon])
+        
+        for i in range(self.lat):
+            for j in range(self.lon):
+                
+                griddata=self.raw_data[:,i,j]
+                tstd=griddata.std()
+                p0=self._guess_p(tstd)
+                
+                plsq=leastsq(self._get_residual,p0,args=(griddata,self.t,self.N))
+                fit_coeffs[:,i,j]=plsq[0]
+        self.coeffs=fit_coeffs
+        
+    def evaluate_cycle(self,t):
+        
+        if self.coeffs is None:
+            raise(ValueError("No coefficients for fitting have been calculated yet."))
+            
+        if t.units!=self.t_unit:
+            if t.units.is_convertible(self.t_unit):
+                t=t.convert_units(self.t_unit)
+            else:
+                raise(ValueError("Units of time series to evaluate are incompatible\
+                                 with units of fitted time series."))
+        t=t.points
+        t=(t-self.tref)%self.period
+        
+        cycle=np.zeros([len(t),self.lat,self.lon])
+        for i in range(self.lat):
+            for j in range(self.lon):
+                cycle[:,i,j]=self._evaluate_fit(t,self.coeffs[:,i,j],self.N)
+                
+        return cycle
+
+            
         
 """Analysis is a subclass of Dataset that deals with reanalysis. At the moment
 specific to era5, but that should be changed if more analyses start being used."""
