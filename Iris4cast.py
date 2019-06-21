@@ -337,8 +337,12 @@ class Dataset:
         
                 #include the land sea mask in the weighting if one was passed.
                 if mask is not None:
-                    assert mask.coord("latitude")==self.data[key][i].coord("latitude")
-                    assert mask.coord("longitude")==self.data[key][i].coord("longitude")
+                    assert mask.coord("latitude").points==self.data[key][i].coord("latitude").points
+                    assert mask.coord("longitude").points==self.data[key][i].coord("longitude").points
+                    assert mask.coord("latitude").units==self.data[key][i].coord("latitude").units
+                    assert mask.coord("longitude").units==self.data[key][i].coord("longitude").units
+    
+
     
                     weights=weights*mask.data
                     
@@ -428,7 +432,7 @@ class Dataset:
             means[i,j,k]=self.distribution[i:i+2,j,k].mean()
         self.dist_means=means
         
-    def get_seasonal_cycle(self,N,keys=None):
+    def get_seasonal_cycle(self,N=4,period=365.25,keys=None):
         
         """Fits N sine modes to the data series, with frequencies of n/(365.25 days)
         for n in [1,...,N], in order to calculate a smooth seasonal cycle.
@@ -438,6 +442,28 @@ class Dataset:
             to calculate the cycle. If keys is None, all data in the dataset
             will be used.
         """
+        #Default is to include all data
+        if keys is None: keys = [key for key in self.data]
+        
+        self.deseasonaliser=_Deseasonaliser(self.data,keys,N,period)
+        self.deseasonaliser.fit_cycle()
+        
+    def remove_seasonal_cycle(self,deseasonaliser=None,strict_t_ax=False):
+        
+        if deseasonaliser is None:
+            if self.deseasonaliser is None:
+                raise(ValueError("No _Deseasonaliser object found."))
+            else:
+                deseasonaliser=self.deseasonaliser
+        
+        if deseasonaliser.coeffs is None:
+            deseasonaliser.fit_cycle()
+        
+        for key in self.data:
+            for i,cube in enumerate(self.data[key]):
+                cycle=deseasonaliser.evaluate_cycle(cube.coord("time"),strict=strict_t_ax)
+                self.data[key][i].data=cube.data-cycle
+                
 class _Deseasonaliser:
 
     def __init__(self,data,keys,N,period=365.25,coeffs=None):
@@ -464,8 +490,9 @@ class _Deseasonaliser:
                     
                 self.t.append(cube.coord("time").points)
                 
-        self.raw_data=np.concatenate(self.raw_data,axis=0)    
-        self.t=np.concatenate(self.t,axis=0)
+        i=cube.coord_dims("time")[0]        
+        self.raw_data=np.concatenate(self.raw_data,axis=i)    
+        self.t=np.concatenate(self.t,axis=i)
         
         self._setup_data()
         self.lat,self.lon=self.raw_data.shape[1:]
@@ -484,8 +511,11 @@ class _Deseasonaliser:
         
         for i in range(0,self.N):
             p[2+2*i]=tstd/(i+1.0)
-        return p        
-    
+        return p  
+      
+    def _change_calendar(self,new_calendar):
+        self.t_unit=cf_units.Unit(self.t_unit.origin,calendar=new_calendar)
+       
     #defines multimode sine function for fitting
     def _evaluate_fit(self,x,p,N):
         ans=p[0]*x+p[1]
@@ -512,17 +542,22 @@ class _Deseasonaliser:
                 fit_coeffs[:,i,j]=plsq[0]
         self.coeffs=fit_coeffs
         
-    def evaluate_cycle(self,t):
+    def evaluate_cycle(self,t,strict=False):
         
+        t=t.copy()
         if self.coeffs is None:
             raise(ValueError("No coefficients for fitting have been calculated yet."))
             
         if t.units!=self.t_unit:
             if t.units.is_convertible(self.t_unit):
-                t=t.convert_units(self.t_unit)
+                t.convert_units(self.t_unit)
+                
+            elif (t.units.origin==self.t_unit.origin) and (not strict):
+                t.units=cf_units.Unit(t.units.origin,calendar=self.t_unit.calendar)
+                
             else:
-                raise(ValueError("Units of time series to evaluate are incompatible\
-                                 with units of fitted time series."))
+                raise(ValueError("Units of time series to evaluate are \
+                            incompatible with units of fitted time series."))
         t=t.points
         t=(t-self.tref)%self.period
         
@@ -743,7 +778,7 @@ of past dates.
 
 #All bounds are inclusive.
 #3 week period centred around 11/6/2003
-dates=[dt.datetime(2003,6,1,12),dt.datetime(2003,6,21,12)]        
+dates=[dt.datetime(2003,6,1,12),dt.datetime(2006,6,21,12)]        
 leads=[14.5,20.5] #Week 3, in days. We want midday, so we add .5
 run=False
 if run:
