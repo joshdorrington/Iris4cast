@@ -63,7 +63,7 @@ class Dataset:
 
         #Only data of the same forecast hour is currently supported.
         assert dates[0].hour==dates[1].hour
-        self.hour=dates[0].hour
+        self.hour=[dates[0].hour]
 
         #Name of the primary time coordinate
         self.T="time"
@@ -98,7 +98,8 @@ class Dataset:
                 self._in_calendar_bounds(cell)}),
     
         #keep only data for the right hour
-        "hour":iris.Constraint(hour=self.hour),
+        "hour":iris.Constraint(coord_values={"hour":lambda cell:\
+                                             np.isin(cell,self.hour)[0]}),
         
         #keep only data that falls within the dates
         "data":iris.Constraint(coord_values={self.T:lambda cell:\
@@ -146,9 +147,12 @@ class Dataset:
         """Load data from self.path as a list of iris cubes, preprocess it, 
         and split it into two CubeLists "data" and "clim".
         """
-        
-        self.data=iris.load([self.path+f for f in os.listdir(self.path) if f.endswith(".nc")],
-                             constraints=self.constraints["load"])
+        CL=iris.cube.CubeList()
+        fs=[self.path+f for f in os.listdir(self.path) if f.endswith(".nc")]
+        for f in fs:
+            CL.append(iris.load_cube(f,constraint=self.constraints["load"]))
+            
+        self.data=CL
         self._clean_loaded_data()
                 
         a=self.data.extract(self.constraints["data"])
@@ -190,6 +194,10 @@ class Dataset:
         elif region.lower()=="france":
             lons=[-5,8]
             lats=[42,51]
+            
+        elif region.lower()=="north_atlantic":
+            lons=[-80,40]
+            lats=[30,90]
         
         else: raise(ValueError(f"Unrecognised region {region}."))
         
@@ -258,6 +266,15 @@ class Dataset:
         
         self.data["data"]=CL_data.concatenate()
         self.data["clim"]=CL_clim.concatenate()
+         
+    def change_calendar(self,newcalendar):
+        
+        for key in self.data:
+            for i,entry in enumerate(self.data[key]):
+                newunit=cf_units.Unit(\
+                        entry.coord("time").units.origin,calendar=newcalendar)
+                
+                self.data[key][i].coord("time").unit=newunit
                 
     def aggregate_by(self,coords,bins,aggregator=iris.analysis.MEAN):
         
@@ -337,13 +354,6 @@ class Dataset:
         
                 #include the land sea mask in the weighting if one was passed.
                 if mask is not None:
-                    assert mask.coord("latitude").points==self.data[key][i].coord("latitude").points
-                    assert mask.coord("longitude").points==self.data[key][i].coord("longitude").points
-                    assert mask.coord("latitude").units==self.data[key][i].coord("latitude").units
-                    assert mask.coord("longitude").units==self.data[key][i].coord("longitude").units
-    
-
-    
                     weights=weights*mask.data
                     
                 self.data[key][i]=entry.collapsed(["latitude","longitude"],\
@@ -461,8 +471,22 @@ class Dataset:
         
         for key in self.data:
             for i,cube in enumerate(self.data[key]):
+                
                 cycle=deseasonaliser.evaluate_cycle(cube.coord("time"),strict=strict_t_ax)
+                if cycle.shape!=cube.shape:
+                    dim_map=[cube.coord_dims(coord)[0] for coord in \
+                             ["time","latitude","longitude"]]
+                    cycle=iris.util.broadcast_to_shape(cycle,cube.shape,dim_map)
+                    
                 self.data[key][i].data=cube.data-cycle
+                
+    def set_time_axis_first(self,tname="time"):
+        for key in self.data:
+            for entry in self.data[key]:
+                t_ax=entry.coord_dims(tname)[0]
+                if t_ax!=0:
+                    ax=np.arange(entry.ndim)
+                    entry.transpose([t_ax,*ax[ax!=t_ax]])
                 
 class _Deseasonaliser:
 
@@ -590,7 +614,16 @@ class Analysis(Dataset):
                 self.data[i].coord("longitude").points.astype(np.float32)
             
         self.data=self.data.concatenate_cube()
-        self.data.coord(self.T).convert_units(self.U)
+        try:
+            self.data.coord(self.T).convert_units(self.U)
+        except:
+            print(f"Warning: could not convert {self.T} to {self.U}, simply renaming calendar.")
+            new_T=cf_units.Unit(self.data.coord(self.T).units.origin,self.U.calendar)
+            self.data.coord(self.T).units=new_T
+            try:
+                self.data.coord(self.T).convert_units(self.U)
+            except:
+                raise(ValueError("Unsuccesful attempt to change time units."))
         
         iccat.add_hour(self.data,self.T)
         self.data=self.data.extract(self.constraints["hour"])
